@@ -1,0 +1,31 @@
+function [D,E,c] = Ruiz(P,q,A,C,epsilon)
+    n = size(P,1);
+    m = size(A,1);
+    M = [P A';
+         A zeros(m)];
+    c = 1;
+    S = eye(n+m);
+    delta = zeros(n+m);
+    P_bar = P; q_bar = q; A_bar = A;C_bar = C;
+%     while norm(eye(n+m)-delta,"inf") > epsilon
+    for k = 1 : 2 
+        for i = 1 : (n+m)
+            delta_i = 1/sqrt(max(abs(M(i,:))));
+            delta(i,i) = delta_i;
+        end
+        D = delta(1:n,1:n);
+        E = delta(n+1:n+m, n+1:n+m);
+        P_bar = D * P_bar * D;
+        q_bar = D * q_bar;
+        A_bar = E * A_bar * D;
+        C_bar = E * C_bar;
+        gamma = 1/max(norm(P,"inf"), norm(q,"inf"));
+        P_bar = gamma * P_bar;
+        q_bar = gamma * q_bar;
+        S = delta * S;
+        c = gamma * c;        
+    end
+    D = S(1:n,1:n);
+    E = S(n+1:n+m, n+1:n+m);
+end
+

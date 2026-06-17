@@ -1,0 +1,196 @@
+function [x, u, lambda, mu] = ADMM_Solver(Q, q, S, R, r, A, B, gamma, D, E, c, ...                                     
+                                          x0, u0, lambda0, v0, mu0, ...
+                                          eta, rho, selfsigma, ADMM_MaxIter, ADMM_abs_eps, ADMM_rel_eps, ...
+                                          rho_update_inteval, adaptive_rho_tolerance, ...
+                                          PIPG_MaxIter, PIPG_Tol, omega)
+%     tic;
+    StateDim = size(x0,1);
+    InputDim = size(u0,1);
+    N = size(u0,2);
+
+    x1 = x0; u1 = u0; v1 = v0; mu1 = mu0; tilde_v = v1;
+    ADMM_Iter_Num = 0;
+
+    tilde_Q = zeros(size(Q,1), size(Q,2));
+    tilde_S = zeros(size(S,1), size(S,2));
+    tilde_R = zeros(size(R,1), size(R,2));
+    tilde_q = zeros(size(q,1), size(q,2));
+    tilde_r = zeros(size(r,1), size(r,2));
+
+    Initial_PIPG_Tol = 100 * ADMM_abs_eps;
+
+    for k = 1:N
+       tilde_Q(:,:,k) = Q(:,:,k) + rho*D{k}'*D{k} + selfsigma*eye(StateDim);       % Update \tilde{Q_k}
+       tilde_R(:,:,k) = R(:,:,k) + rho*E{k}'*E{k} + selfsigma*eye(InputDim);       % Update \tilde{R_k}
+       tilde_S(:,:,k) = S(:,:,k) + rho*D{k}'*E{k};                                 % Update \tilde{S_k}
+    end
+       tilde_Q(:,:,N+1) = Q(:,:,N+1) + rho*D{N+1}'*D{N+1} + selfsigma*eye(StateDim);   % Update \tilde{Q_N}
+
+%     special_x0 = x0;
+    while ADMM_Iter_Num < ADMM_MaxIter
+        if mod(ADMM_Iter_Num, rho_update_inteval) == 0 && ADMM_Iter_Num > 0 
+            scale = sqrt((primal_res * dual_norm_rel)/(dual_res * primal_norm_rel));
+            rho_estimate = scale * rho;
+            rho_estimate = min(max(rho_estimate, 1e-6), 1e6);
+            if rho_estimate > rho * adaptive_rho_tolerance || rho_estimate < rho / adaptive_rho_tolerance
+               rho = rho_estimate;
+               for k = 1:N
+                   tilde_Q(:,:,k) = Q(:,:,k) + rho*D{k}'*D{k} + selfsigma*eye(StateDim);       % Update \tilde{Q_k}
+                   tilde_R(:,:,k) = R(:,:,k) + rho*E{k}'*E{k} + selfsigma*eye(InputDim);       % Update \tilde{R_k}
+                   tilde_S(:,:,k) = S(:,:,k) + rho*D{k}'*E{k};                                 % Update \tilde{S_k}
+               end
+                   tilde_Q(:,:,N+1) = Q(:,:,N+1) + rho*D{N+1}'*D{N+1} + selfsigma*eye(StateDim);   % Update \tilde{Q_N}
+            end
+        end        
+        
+        primal_res = 0;
+        dual_res = 0;
+        primal_norm_rel = zeros(1,2);
+        dual_norm_rel = 0;
+
+        % Update the Coefficient of Linear Term in Cost Function
+        % Corresponding to Line 13 of Algorithm 2 in the manuscripts
+        for k = 1:N
+            tilde_q(:,k) = q(:,k) - rho*D{k}'*v0{k} + D{k}'*mu0{k} - selfsigma*x0(:,k);
+            tilde_r(:,k) = r(:,k) - rho*E{k}'*v0{k} + E{k}'*mu0{k} - selfsigma*u0(:,k);
+        end
+        tilde_q(:,N+1) = q(:,N+1) - rho*D{N+1}'*v0{N+1} + D{N+1}'*mu0{N+1} - selfsigma*x0(:,N+1);
+        
+        [H, h, G, g] = Matrix_Compaction(tilde_Q, tilde_q, tilde_S, tilde_R, tilde_r, A, B, x0, gamma, N);
+        
+
+        % Scale矩阵
+        Scl_signal = 0;
+        if Scl_signal == 1
+            Scl_Mat = zeros(size(H));
+            for i = 1 : size(H,1)
+%                 Scl_Mat(i,i) = 1/sqrt(H(i,i)+max(abs(G(:,i))));
+                Scl_Mat(i,i) = 1/sqrt(max(abs(H(i,:))));
+            end
+            H = Scl_Mat' * H * Scl_Mat;
+            h = Scl_Mat' * h;
+            
+            Cons_Scl_Mat = zeros(size(G,1), size(G,1));
+            for i = 1:size(Cons_Scl_Mat,1)
+                Cons_Scl_Mat(i,i) = 1/max(abs(G(i,:)));
+            end
+            G = Cons_Scl_Mat * G * Scl_Mat;
+            g = Cons_Scl_Mat * g;
+%             [Scl_Mat, Cons_Scl_Mat, c] = Ruiz(H,h,G,g,0.1);
+%             H = c * Scl_Mat' * H * Scl_Mat;
+%             h = c * Scl_Mat' * h;
+%             G = Cons_Scl_Mat * G * Scl_Mat;
+%             g = Cons_Scl_Mat * g;
+        else
+            Scl_Mat = eye(size(H));
+        end
+        % Calculate α and β
+        % Corresponding to Line 7 of Algorithm 2
+        if mod(ADMM_Iter_Num, rho_update_inteval) == 0
+%             nu = max(eigs(H));
+%             sigma = max(eigs(G'*G));
+            nu = eigs(H,1);
+            sigma = eigs(G'*G,1);
+            alpha = 2/(nu+sqrt(nu^2+4*omega*sigma));
+            beta = omega * alpha;
+        end
+
+        
+        % STEP 1 of ADMM: Adopt PIPG to solve LQR
+        % Corresponding to Line 9 of Algorithm 2
+%         if ADMM_Iter_Num == 0
+%             current_PIPG_Tol = max(PIPG_Tol, Initial_PIPG_Tol);
+%         else
+%             current_PIPG_Tol = max(PIPG_Tol, 0.1 * Initial_PIPG_Tol);
+%         end
+        current_PIPG_Tol = max(PIPG_Tol, 0.1 * primal_res);
+        [tilde_x, tilde_u, lambda1, IterNum] = xPIPG_Solver(H, h, G, g, x0, u0, lambda0, Scl_Mat,...
+                                                  PIPG_MaxIter, current_PIPG_Tol, alpha, beta);
+
+%         if IterNum > 1000
+%             PIPG_Tol = 3e-3;
+%         end
+        
+        % Update Primal, Slack and Dual variables
+        % Corresponding to Line 10-12 of Algorithm 2
+        for k = 1 : N
+            v_k = v0{k};
+%             x1(:,k) = eta * tilde_x(:,k,end) + (1-eta) * x0(:,k);
+%             u1(:,k) = eta * tilde_u(:,k,end) + (1-eta) * u0(:,k);
+            x1(:,k) = tilde_x(:,k,end);
+            u1(:,k) = tilde_u(:,k,end);
+            tilde_v{k} = eta * (D{k}*tilde_x(:,k,end) + E{k}*tilde_u(:,k,end)) + (1-eta) * v0{k};
+            v1{k} = min(-c{k}, tilde_v{k} + mu0{k}/rho);
+            mu1{k} = mu0{k} + rho * (tilde_v{k} - v1{k});
+
+            primal_res = max(primal_res, max(abs(D{k}*tilde_x(:,k,end) + E{k}*tilde_u(:,k,end) - v1{k})));
+            dual_vec = rho * [D{k} E{k}]'*(v1{k}-v_k);
+            dual_res = max(dual_res, max(abs(dual_vec)));
+
+            primal_norm_rel(1) = max(primal_norm_rel(1), max(abs(D{k}*tilde_x(:,k,end) + E{k}*tilde_u(:,k,end))));
+            primal_norm_rel(2) = max(primal_norm_rel(2), max(abs(v1{k})));
+            dual_norm_rel = max(dual_norm_rel, max(abs([D{k} E{k}]'*mu1{k})));
+        end
+        v_k = v0{N+1};
+%         x1(:,N+1) = eta * tilde_x(:,N+1,end) + (1-eta) * x0(:,N+1);
+        x1(:,N+1) =  tilde_x(:,N+1,end);
+        tilde_v{N+1} = eta * (D{N+1}*tilde_x(:,N+1,end)) + (1-eta) * v0{N+1};
+        v1{N+1} = min(-c{N+1}, tilde_v{N+1} + mu0{N+1}/rho);
+        mu1{N+1} = mu0{N+1} + rho * (tilde_v{N+1} - v1{N+1});
+
+        primal_res = max(primal_res, max(abs(D{N+1}*tilde_x(:,N+1,end) - v1{N+1})));
+        dual_vec = rho * D{N+1}'*(v1{N+1}-v_k);
+        dual_res = max(dual_res, max(abs(dual_vec)));
+
+        primal_norm_rel(1) = max(primal_norm_rel(1), max(abs(D{N+1}*tilde_x(:,N+1,end))));
+        primal_norm_rel(2) = max(primal_norm_rel(2), max(abs(v1{N+1})));
+
+        dual_norm_rel = max(dual_norm_rel, max(abs(D{N+1}'*mu1{N+1})));
+
+        primal_norm_rel = max(primal_norm_rel);
+        
+        % Check convergence of ADMM
+        ADMM_primal_Tol = ADMM_abs_eps + ADMM_rel_eps * primal_norm_rel;
+        ADMM_dual_Tol = ADMM_abs_eps + ADMM_rel_eps * dual_norm_rel;
+
+        if primal_res <= ADMM_primal_Tol && dual_res <= ADMM_dual_Tol
+            break;
+        end
+        
+        % Update intial variables
+        x0 = x1;
+        u0 = u1;
+        v0 = v1;
+        mu0 = mu1;
+        lambda0 = lambda1(:,:,end);
+        
+        % i = i + 1
+        ADMM_Iter_Num = ADMM_Iter_Num + 1;
+        
+        Initial_PIPG_Tol = primal_res;
+        primal_res_seq(ADMM_Iter_Num) = primal_res;
+    end
+    
+
+%     ADMM_time = toc;
+%     fprintf('ADMM运算时间为%.6f秒\n',ADMM_time)
+    
+    x = x1;
+    u = u1;
+    lambda = lambda1(:,:,end);
+    mu = mu1;
+
+%     if ADMM_Iter_Num == ADMM_MaxIter
+%         figure()
+%         hold on;
+%         plot(primal_res_seq, 'LineStyle','-', 'LineWidth', 1.5 , 'Color','b');
+%         XlabRang = get(gca,'xlim');  % 获取横坐标范围
+%         XlabMmin = XlabRang(1);
+%         XlabMmax = XlabRang(2);
+%         YlabRang = get(gca,'ylim');
+%         YlabMmin = 0;
+%         YlabMmax = ADMM_primal_Tol;
+%         FaceAlpha = 0.8;  % 背景
+%         Background = fill([XlabMmin XlabMmin XlabMmax XlabMmax],[YlabMmin YlabMmax YlabMmax YlabMmin],'b','FaceColor','#898989','FaceAlpha',FaceAlpha);
+%     end
+end
